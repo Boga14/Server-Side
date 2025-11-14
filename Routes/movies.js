@@ -14,6 +14,17 @@ const movies = [
   { id: 10, title: "Titanic", year: 1997 }
 ];
 
+// Middleware "pipe" care transformă numele în majuscule atât în query (name) cât și în body (title)
+function uppercaseName(req, res, next) {
+  if (req.query && req.query.name) {
+    req.query.name = String(req.query.name).toUpperCase();
+  }
+  if (req.body && req.body.title) {
+    req.body.title = String(req.body.title).toUpperCase();
+  }
+  next();
+}
+
 router.get('/list', (req, res) => {
   let output = '';
   movies.forEach(movie => {
@@ -67,7 +78,21 @@ router.post('/add', (req, res) => {
   res.status(201).json(newMovie);
 });
 
-module.exports = router;
+// Endpoint pentru căutare după nume (folosește middleware-ul uppercaseName pentru normalizare)
+router.get('/search/name', uppercaseName, (req, res) => {
+  const name = req.query.name;
+  if (!name) {
+    return res.status(400).json({ error: 'Te rog să specifici parametrul name (ex: ?name=Inception)' });
+  }
+
+  const filtered = movies.filter(m => String(m.title).toUpperCase().includes(name));
+
+  if (filtered.length === 0) {
+    return res.status(404).json({ error: 'Niciun film nu a fost găsit după numele specificat' });
+  }
+
+  res.json(filtered);
+});
 
 router.delete('/:id', (req, res) => {
   const id = parseInt(req.params.id);
