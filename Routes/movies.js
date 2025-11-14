@@ -2,9 +2,9 @@ const express = require('express');
 const router = express.Router();
 
 const { createMovieSchema, updateMovieSchema, searchByNameSchema, searchByMinYearSchema, validate } = require('./validators/movieValidators');
-// ADDED: multer for file uploads (used by import endpoint) and csv helpers
+
 const multer = require('multer');
-const upload = multer({ storage: multer.memoryStorage() }); // store file in memory for validation/parsing
+const upload = multer({ storage: multer.memoryStorage() }); 
 const { csvFileValidator, parseCsvBufferToObjects } = require('./csvPipe');
 
 const movies = [
@@ -91,17 +91,11 @@ router.get('/search/name', validate(searchByNameSchema, { whitelist: true, forbi
   res.json(filtered);
 });
 
-// ADDED: POST /movies/import -> import CSV file
-// - Uses multer to accept file under field 'file'
-// - Uses csvFileValidator to validate presence, extension, size, and headers
-// - Parses CSV and validates each row against simple DTO rules, saves valid rows
 router.post('/import', upload.single('file'), csvFileValidator({ expectedHeaders: ['title', 'year'], maxSize: 2 * 1024 * 1024 }), (req, res) => {
-  // req.file.buffer contains the CSV content
   const rows = parseCsvBufferToObjects(req.file.buffer, req.csvHeader);
 
   const result = { totalRows: rows.length, successful: 0, failed: 0, errors: [], imported: [] };
 
-  // Simple per-row validation (mirrors createMovieSchema constraints)
   rows.forEach((row, idx) => {
     const rowNum = idx + 1;
     const data = {
@@ -110,12 +104,10 @@ router.post('/import', upload.single('file'), csvFileValidator({ expectedHeaders
     };
 
     const rowErrors = [];
-    // title validations: exists, length 2-100, no digits
     if (!data.title) rowErrors.push('Titlul este obligatoriu');
     else if (data.title.length < 2 || data.title.length > 100) rowErrors.push('Titlul trebuie să aibă între 2 și 100 caractere');
     else if (/\d/.test(data.title)) rowErrors.push('Titlul nu poate conține cifre');
 
-    // year validations: exists, integer range
     if (!data.year) rowErrors.push('Anul este obligatoriu');
     else if (!/^\d+$/.test(data.year)) rowErrors.push('Anul trebuie să fie un număr întreg');
     else {
@@ -127,7 +119,6 @@ router.post('/import', upload.single('file'), csvFileValidator({ expectedHeaders
       result.failed += 1;
       result.errors.push({ row: rowNum, data: row, errors: rowErrors });
     } else {
-      // success: create movie record and add to in-memory store
       const movie = { id: movies.length + 1, title: data.title, year: parseInt(data.year, 10) };
       movies.push(movie);
       result.successful += 1;
@@ -138,9 +129,7 @@ router.post('/import', upload.single('file'), csvFileValidator({ expectedHeaders
   res.json(result);
 });
 
-// ADDED: GET /movies/export -> export CSV of movies (supports optional ?name or ?minYear filters)
 router.get('/export', (req, res) => {
-  // Apply optional filters (name or minYear). Reuse existing logic but keep it simple.
   let outputMovies = movies.slice();
 
   if (req.query.name) {
@@ -152,18 +141,15 @@ router.get('/export', (req, res) => {
     if (!isNaN(minY)) outputMovies = outputMovies.filter(m => m.year >= minY);
   }
 
-  // Build CSV (header + rows)
   const header = ['id', 'title', 'year'];
   const csvLines = [header.join(',')];
   outputMovies.forEach(m => {
-    // Escape double quotes in title and wrap in quotes if needed
     const safeTitle = (`"${String(m.title).replace(/"/g, '""')}"`);
     csvLines.push([m.id, safeTitle, m.year].join(','));
   });
 
   const csvContent = csvLines.join('\n');
-
-  // Set headers for download
+  
   res.setHeader('Content-Type', 'text/csv');
   res.setHeader('Content-Disposition', 'attachment; filename="movies_export.csv"');
   res.send(csvContent);
