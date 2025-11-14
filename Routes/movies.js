@@ -1,6 +1,12 @@
 const express = require('express');
 const router = express.Router();
 
+const { createMovieSchema, updateMovieSchema, searchByNameSchema, searchByMinYearSchema, validate } = require('./validators/movieValidators');
+// ADDED: multer for file uploads (used by import endpoint) and csv helpers
+const multer = require('multer');
+const upload = multer({ storage: multer.memoryStorage() }); // store file in memory for validation/parsing
+const { csvFileValidator, parseCsvBufferToObjects } = require('./csvPipe');
+
 const movies = [
   { id: 1, title: "Inception", year: 2010 },
   { id: 2, title: "Interstellar", year: 2014 },
@@ -14,7 +20,7 @@ const movies = [
   { id: 10, title: "Titanic", year: 1997 }
 ];
 
-// Middleware "pipe" care transformă numele în majuscule atât în query (name) cât și în body (title)
+// Pipe LAB2
 function uppercaseName(req, res, next) {
   if (req.query && req.query.name) {
     req.query.name = String(req.query.name).toUpperCase();
@@ -45,12 +51,8 @@ router.get('/details/:id', (req, res) => {
   res.json(movie);
 });
 
-router.get('/search', (req, res) => {
-  const { minYear } = req.query;
-
-  if (!minYear) {
-    return res.status(400).json({ error: 'Te rog să specifici un parametru minYear' });
-  }
+router.get('/search', validate(searchByMinYearSchema, { whitelist: true, forbidNonWhitelisted: false, transform: true }), (req, res) => {
+  const { minYear } = req.query; 
 
   const filtered = movies.filter(movie => movie.year >= parseInt(minYear));
 
@@ -61,12 +63,10 @@ router.get('/search', (req, res) => {
   res.json(filtered);
 });
 
-router.post('/add', (req, res) => {
-  const { title, year } = req.body;
 
-  if (!title || !year) {
-    return res.status(400).json({ error: 'Titlul și anul sunt obligatorii' });
-  }
+router.post('/add', validate(createMovieSchema, { whitelist: true, forbidNonWhitelisted: true, transform: true }), (req, res) => {
+
+  const { title, year } = req.body;
 
   const newMovie = {
     id: movies.length + 1,
@@ -78,12 +78,9 @@ router.post('/add', (req, res) => {
   res.status(201).json(newMovie);
 });
 
-// Endpoint pentru căutare după nume (folosește middleware-ul uppercaseName pentru normalizare)
-router.get('/search/name', uppercaseName, (req, res) => {
-  const name = req.query.name;
-  if (!name) {
-    return res.status(400).json({ error: 'Te rog să specifici parametrul name (ex: ?name=Inception)' });
-  }
+// Endpoint LAB2
+router.get('/search/name', validate(searchByNameSchema, { whitelist: true, forbidNonWhitelisted: true, transform: true }), uppercaseName, (req, res) => {
+  const name = req.query.name; 
 
   const filtered = movies.filter(m => String(m.title).toUpperCase().includes(name));
 
@@ -92,6 +89,84 @@ router.get('/search/name', uppercaseName, (req, res) => {
   }
 
   res.json(filtered);
+});
+
+// ADDED: POST /movies/import -> import CSV file
+// - Uses multer to accept file under field 'file'
+// - Uses csvFileValidator to validate presence, extension, size, and headers
+// - Parses CSV and validates each row against simple DTO rules, saves valid rows
+router.post('/import', upload.single('file'), csvFileValidator({ expectedHeaders: ['title', 'year'], maxSize: 2 * 1024 * 1024 }), (req, res) => {
+  // req.file.buffer contains the CSV content
+  const rows = parseCsvBufferToObjects(req.file.buffer, req.csvHeader);
+
+  const result = { totalRows: rows.length, successful: 0, failed: 0, errors: [], imported: [] };
+
+  // Simple per-row validation (mirrors createMovieSchema constraints)
+  rows.forEach((row, idx) => {
+    const rowNum = idx + 1;
+    const data = {
+      title: row.title ? String(row.title).trim() : '',
+      year: row.year ? String(row.year).trim() : ''
+    };
+
+    const rowErrors = [];
+    // title validations: exists, length 2-100, no digits
+    if (!data.title) rowErrors.push('Titlul este obligatoriu');
+    else if (data.title.length < 2 || data.title.length > 100) rowErrors.push('Titlul trebuie să aibă între 2 și 100 caractere');
+    else if (/\d/.test(data.title)) rowErrors.push('Titlul nu poate conține cifre');
+
+    // year validations: exists, integer range
+    if (!data.year) rowErrors.push('Anul este obligatoriu');
+    else if (!/^\d+$/.test(data.year)) rowErrors.push('Anul trebuie să fie un număr întreg');
+    else {
+      const y = parseInt(data.year, 10);
+      if (y < 1888 || y > 2100) rowErrors.push('Anul trebuie să fie între 1888 și 2100');
+    }
+
+    if (rowErrors.length) {
+      result.failed += 1;
+      result.errors.push({ row: rowNum, data: row, errors: rowErrors });
+    } else {
+      // success: create movie record and add to in-memory store
+      const movie = { id: movies.length + 1, title: data.title, year: parseInt(data.year, 10) };
+      movies.push(movie);
+      result.successful += 1;
+      result.imported.push(movie);
+    }
+  });
+
+  res.json(result);
+});
+
+// ADDED: GET /movies/export -> export CSV of movies (supports optional ?name or ?minYear filters)
+router.get('/export', (req, res) => {
+  // Apply optional filters (name or minYear). Reuse existing logic but keep it simple.
+  let outputMovies = movies.slice();
+
+  if (req.query.name) {
+    const name = String(req.query.name).toUpperCase();
+    outputMovies = outputMovies.filter(m => String(m.title).toUpperCase().includes(name));
+  }
+  if (req.query.minYear) {
+    const minY = parseInt(req.query.minYear, 10);
+    if (!isNaN(minY)) outputMovies = outputMovies.filter(m => m.year >= minY);
+  }
+
+  // Build CSV (header + rows)
+  const header = ['id', 'title', 'year'];
+  const csvLines = [header.join(',')];
+  outputMovies.forEach(m => {
+    // Escape double quotes in title and wrap in quotes if needed
+    const safeTitle = (`"${String(m.title).replace(/"/g, '""')}"`);
+    csvLines.push([m.id, safeTitle, m.year].join(','));
+  });
+
+  const csvContent = csvLines.join('\n');
+
+  // Set headers for download
+  res.setHeader('Content-Type', 'text/csv');
+  res.setHeader('Content-Disposition', 'attachment; filename="movies_export.csv"');
+  res.send(csvContent);
 });
 
 router.delete('/:id', (req, res) => {
@@ -106,7 +181,7 @@ router.delete('/:id', (req, res) => {
   res.json({ message: 'Filmul a fost șters', film: deleted });
 });
 
-router.put('/:id', (req, res) => {
+router.put('/:id', validate(updateMovieSchema, { whitelist: true, forbidNonWhitelisted: true, transform: true }), (req, res) => {
   const id = parseInt(req.params.id);
   const { title, year } = req.body;
   const movie = movies.find(m => m.id === id);
